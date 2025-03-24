@@ -49,7 +49,7 @@ class ForexSignalBot:
         self.higher_timeframe = higher_timeframe
         self.lower_timeframe = lower_timeframe
         self.fixed_risk_amount = 100
-        self.min_risk_reward = 1.5
+        self.min_risk_reward = 1.75
         
         # Risk management
         self.initial_balance = 10000
