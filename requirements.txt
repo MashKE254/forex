@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+numpy
+pandas
+pytz
+python-dotenv
+oandapyV20
+python-telegram-bot
+apscheduler
+requests
