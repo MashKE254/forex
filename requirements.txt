@@ -1,10 +1,24 @@
-fastapi
-uvicorn
-numpy
-pandas
-pytz
-python-dotenv
-oandapyV20
-python-telegram-bot
-apscheduler
-requests
+# API and web framework
+fastapi>=0.103.1
+uvicorn>=0.23.2
+pydantic>=2.3.0
+
+# Data processing and visualization
+numpy>=1.24.0
+pandas>=2.1.0
+matplotlib>=3.7.2
+
+# Financial data
+oandapyV20>=0.7.2
+
+# Async and scheduling
+asyncio>=3.4.3
+apscheduler>=3.10.1
+
+# Telegram integration
+python-telegram-bot>=20.5
+
+# Utilities
+python-dotenv>=1.0.0
+pytz>=2023.3
+typing>=3.7.4.3
