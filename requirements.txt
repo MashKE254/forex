@@ -22,3 +22,5 @@ python-telegram-bot>=20.5
 python-dotenv>=1.0.0
 pytz>=2023.3
 typing>=3.7.4.3
+
+requests>=2.26.0
