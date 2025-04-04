@@ -665,7 +665,7 @@ class ForexTradingBot:
         if self.timeframe == 'H1':
             self.scheduler.add_job(
                 self.run_scanner,
-                trigger=CronTrigger(minute=1),  # Run at 1 minute past every hour
+                trigger=CronTrigger(minute='*/5'),  # Run every 5 minutes for H1 timeframe
                 id='scanner_job',
                 replace_existing=True
             )
