@@ -122,6 +122,7 @@ class ForexTradingBot:
         self.active_trades: Dict[str, TradeSignal] = {}
         self.historical_trades: List[BacktestResult] = []
         self.last_check_time = datetime.utcnow() - timedelta(hours=1)  # Initialize to 1 hour ago
+        self.last_data_fetch = {}  # Track when we last fetched data for each pair
         
         # Create scheduler for periodic tasks
         self.scheduler = AsyncIOScheduler()
@@ -169,24 +170,27 @@ class ForexTradingBot:
         timeframe: str = None,
         start_date: datetime = None,
         end_date: datetime = None,
-        count: int = 200
+        count: int = 200,
+        include_incomplete: bool = True
     ) -> pd.DataFrame:
         """Fetch historical price data from OANDA API"""
         try:
-            logger.info(f"Fetching historical data for {pair}")
+            current_time = datetime.utcnow()
+            log_prefix = f"[{current_time.isoformat()}] Fetching historical data for {pair}"
+            logger.info(f"{log_prefix}")
             
             # Use provided timeframe or default
             tf = timeframe or self.timeframe
             
             # Set default end_date to now if not provided
             if end_date is None:
-                end_date = datetime.utcnow()
+                end_date = current_time
             
             # Set default start_date if not provided
             if start_date is None:
                 if tf == 'H1':
-                    # For H1, get 200 candles (about 8 days worth)
-                    start_date = end_date - timedelta(days=8)
+                    # For H1, get more recent data to ensure we catch intra-hour moves
+                    start_date = end_date - timedelta(hours=24)  # Last 24 hours is enough for signal detection
                 elif tf == 'H4':
                     # For H4, get 200 candles (about 33 days worth)
                     start_date = end_date - timedelta(days=33)
@@ -199,8 +203,13 @@ class ForexTradingBot:
                 "from": start_date.strftime('%Y-%m-%dT%H:%M:%SZ'),
                 "to": end_date.strftime('%Y-%m-%dT%H:%M:%SZ'),
                 "granularity": tf,
-                "price": "M"  # Midpoint pricing
+                "price": "M",  # Midpoint pricing
+                "includeFirst": "true"
             }
+            
+            # Add parameter to include incomplete candles (the current one that's still forming)
+            if include_incomplete:
+                params["includeFirst"] = "true"
             
             # Create the instruments candles request
             r = instruments.InstrumentsCandles(
@@ -214,24 +223,33 @@ class ForexTradingBot:
             # Process the candles
             prices = []
             for candle in response['candles']:
-                if candle['complete']:
-                    prices.append({
-                        'time': pd.to_datetime(candle['time']),
-                        'open': float(candle['mid']['o']),
-                        'high': float(candle['mid']['h']),
-                        'low': float(candle['mid']['l']),
-                        'close': float(candle['mid']['c'])
-                    })
+                prices.append({
+                    'time': pd.to_datetime(candle['time']),
+                    'open': float(candle['mid']['o']),
+                    'high': float(candle['mid']['h']),
+                    'low': float(candle['mid']['l']),
+                    'close': float(candle['mid']['c']),
+                    'complete': candle['complete']
+                })
             
             # Convert to DataFrame
             df = pd.DataFrame(prices)
             
-            # Add pair information to index
+            # Add pair information and set index
             if not df.empty:
                 df.set_index('time', inplace=True)
                 df['pair'] = pair
             
-            logger.info(f"Retrieved {len(df)} candles for {pair}")
+            # Update last fetch time for this pair
+            self.last_data_fetch[pair] = current_time
+            
+            logger.info(f"{log_prefix} - Retrieved {len(df)} candles")
+            
+            # Log the first and last few candles for debugging
+            if not df.empty and len(df) > 2:
+                logger.debug(f"First candle: {df.index[0]}, Last candle: {df.index[-1]}")
+                logger.debug(f"Last candle complete: {df['complete'].iloc[-1]}")
+                
             return df
         
         except V20Error as e:
@@ -292,69 +310,94 @@ class ForexTradingBot:
 
     def check_entry_conditions(self, data: pd.DataFrame) -> Optional[TradeSignal]:
         """Check if current market conditions meet entry criteria"""
-        if data.empty or len(data) < 2:
+        if data.empty or len(data) < 3:
             return None
         
-        # Get last two candles for entry condition check
-        current = data.iloc[-2]
-        next_bar = data.iloc[-1]
-        pair = current['pair']
-        
-        # Long Entry Conditions
-        long_conditions = (
-            current['EMA50'] > current['EMA200'] and
-            current['MACD_Hist'] <= 0 and
-            next_bar['MACD_Hist'] > 0 and
-            current['RSI'] < 65 and
-            current['ADX'] > 25
-        )
-        
-        # Short Entry Conditions
-        short_conditions = (
-            current['EMA50'] < current['EMA200'] and
-            current['MACD_Hist'] >= 0 and
-            next_bar['MACD_Hist'] < 0 and
-            current['RSI'] > 35 and
-            current['ADX'] > 25
-        )
-        
-        if long_conditions:
-            entry_price = next_bar['open']
-            # Simulate finding stop loss and take profit
-            lookback_window = 10
-            pre_entry_data = data.iloc[-lookback_window-2:-2]
-            stop_loss = pre_entry_data['low'].min()
-            take_profit = entry_price + (entry_price - stop_loss) * self.min_risk_reward
+        # Get relevant candles for entry condition check
+        # Using -3, -2, -1 to ensure we're looking at the right pattern
+        # -3: previous complete candle, -2: most recent complete candle, -1: current forming candle
+        try:
+            previous = data.iloc[-3]
+            current = data.iloc[-2]  
+            latest = data.iloc[-1]  # This might be incomplete
             
-            return TradeSignal(
-                pair=pair,
-                type="LONG",
-                entry_price=entry_price,
-                entry_time=data.index[-1],
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                risk_reward=self.min_risk_reward
-            )
-        
-        if short_conditions:
-            entry_price = next_bar['open']
-            # Simulate finding stop loss and take profit
-            lookback_window = 10
-            pre_entry_data = data.iloc[-lookback_window-2:-2]
-            stop_loss = pre_entry_data['high'].max()
-            take_profit = entry_price - (stop_loss - entry_price) * self.min_risk_reward
+            # Log candle times for debugging
+            logger.debug(f"Checking signal conditions for candles at: {data.index[-3]}, {data.index[-2]}, {data.index[-1]}")
             
-            return TradeSignal(
-                pair=pair,
-                type="SHORT",
-                entry_price=entry_price,
-                entry_time=data.index[-1],
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                risk_reward=self.min_risk_reward
+            pair = current['pair']
+            
+            # Long Entry Conditions - Modified to use appropriate candles
+            long_conditions = (
+                current['EMA50'] > current['EMA200'] and
+                previous['MACD_Hist'] <= 0 and
+                current['MACD_Hist'] > 0 and  # MACD crossed above signal line
+                current['RSI'] < 65 and
+                current['ADX'] > 25
             )
-        
-        return None
+            
+            # Short Entry Conditions - Modified to use appropriate candles
+            short_conditions = (
+                current['EMA50'] < current['EMA200'] and
+                previous['MACD_Hist'] >= 0 and
+                current['MACD_Hist'] < 0 and  # MACD crossed below signal line
+                current['RSI'] > 35 and
+                current['ADX'] > 25
+            )
+            
+            # If conditions are met, log the exact values for debugging
+            if long_conditions or short_conditions:
+                logger.info(f"Potential signal for {pair}:")
+                logger.info(f"EMA50: {current['EMA50']:.5f}, EMA200: {current['EMA200']:.5f}")
+                logger.info(f"Previous MACD_Hist: {previous['MACD_Hist']:.5f}, Current MACD_Hist: {current['MACD_Hist']:.5f}")
+                logger.info(f"RSI: {current['RSI']:.2f}, ADX: {current['ADX']:.2f}")
+            
+            if long_conditions:
+                entry_price = latest['open']  # Use the open of the latest candle as entry
+                # Find stop loss from recent price action
+                lookback_window = 10
+                pre_entry_data = data.iloc[-lookback_window-2:-2]
+                stop_loss = pre_entry_data['low'].min()
+                take_profit = entry_price + (entry_price - stop_loss) * self.min_risk_reward
+                
+                # Log detailed signal information
+                logger.info(f"LONG signal detected for {pair} at {entry_price:.5f}")
+                
+                return TradeSignal(
+                    pair=pair,
+                    type="LONG",
+                    entry_price=entry_price,
+                    entry_time=data.index[-1],
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    risk_reward=self.min_risk_reward
+                )
+            
+            if short_conditions:
+                entry_price = latest['open']  # Use the open of the latest candle as entry
+                # Find stop loss from recent price action
+                lookback_window = 10
+                pre_entry_data = data.iloc[-lookback_window-2:-2]
+                stop_loss = pre_entry_data['high'].max()
+                take_profit = entry_price - (stop_loss - entry_price) * self.min_risk_reward
+                
+                # Log detailed signal information
+                logger.info(f"SHORT signal detected for {pair} at {entry_price:.5f}")
+                
+                return TradeSignal(
+                    pair=pair,
+                    type="SHORT",
+                    entry_price=entry_price,
+                    entry_time=data.index[-1],
+                    stop_loss=stop_loss,
+                    take_profit=take_profit,
+                    risk_reward=self.min_risk_reward
+                )
+            
+            return None
+        except IndexError as e:
+            logger.error(f"IndexError in check_entry_conditions: {e}")
+            logger.error(f"Data shape: {data.shape}, index: {data.index}")
+            return None
 
     def check_trade_exits(self, active_trade: TradeSignal, current_data: pd.DataFrame) -> Optional[BacktestResult]:
         """Check if an active trade should be closed"""
@@ -486,6 +529,8 @@ class ForexTradingBot:
     async def scan_for_signals(self) -> List[TradeSignal]:
         """Scan all currency pairs for trading signals"""
         signals = []
+        current_time = datetime.utcnow()
+        logger.info(f"[{current_time.isoformat()}] Running full scan for trading signals")
         
         for pair in self.pairs:
             # Skip if we already have an active trade for this pair
@@ -493,8 +538,15 @@ class ForexTradingBot:
                 continue
                 
             try:
-                # Fetch and prepare data
-                data = await self.fetch_historical_data(pair)
+                # Fetch and prepare data - explicitly request fresh data
+                # Use a shorter timeframe to ensure we get the most recent candles
+                data = await self.fetch_historical_data(
+                    pair=pair,
+                    start_date=current_time - timedelta(hours=24),  # Last 24 hours
+                    end_date=current_time,  # Up to now
+                    include_incomplete=True  # Include current forming candle
+                )
+                
                 if data.empty:
                     logger.warning(f"No data available for {pair}, skipping...")
                     continue
@@ -509,16 +561,27 @@ class ForexTradingBot:
             except Exception as e:
                 logger.error(f"Error scanning {pair}: {str(e)}")
         
+        logger.info(f"Scan complete. Found {len(signals)} signals.")
         return signals
 
     async def update_active_trades(self) -> List[BacktestResult]:
         """Update status of active trades and check for exits"""
         closed_trades = []
         
+        if not self.active_trades:
+            return closed_trades
+            
+        logger.info(f"Updating {len(self.active_trades)} active trades")
+        
         for pair, trade in list(self.active_trades.items()):
             try:
                 # Fetch latest data
-                data = await self.fetch_historical_data(pair)
+                data = await self.fetch_historical_data(
+                    pair=pair, 
+                    start_date=datetime.utcnow() - timedelta(hours=4),  # Just need recent data
+                    include_incomplete=True  # Include incomplete candles
+                )
+                
                 if data.empty:
                     logger.warning(f"No data available to update trade for {pair}")
                     continue
@@ -560,7 +623,8 @@ class ForexTradingBot:
 
     async def run_scanner(self):
         """Main scanner function to run periodically"""
-        logger.info("Running trading signal scanner")
+        current_time = datetime.utcnow()
+        logger.info(f"[{current_time.isoformat()}] Running trading signal scanner")
         
         try:
             # Check for new signals
@@ -595,7 +659,7 @@ class ForexTradingBot:
             await self.update_active_trades()
             
             # Update last check time
-            self.last_check_time = datetime.utcnow()
+            self.last_check_time = current_time
             
             # Generate performance report if we have closed trades
             if self.historical_trades and len(self.historical_trades) % 5 == 0:  # Every 5 trades
