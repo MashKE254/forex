@@ -659,31 +659,17 @@ class ForexTradingBot:
 
     async def start_scheduler(self):
         """Start the background scheduler"""
-        # Add scanner job based on timeframe
-        if self.timeframe == 'H1':
-            self.scheduler.add_job(
-                self.run_scanner,
-                trigger=CronTrigger(minute=1),  # Run at 1 minute past every hour
-                id='scanner_job',
-                replace_existing=True
-            )
-        elif self.timeframe == 'H4':
-            self.scheduler.add_job(
-                self.run_scanner,
-                trigger=CronTrigger(hour='*/4', minute=1),  # Run every 4 hours
-                id='scanner_job',
-                replace_existing=True
-            )
-        else:
-            # Default to hourly
-            self.scheduler.add_job(
-                self.run_scanner,
-                trigger=CronTrigger(minute=1),  # Run at 1 minute past every hour
-                id='scanner_job',
-                replace_existing=True
-            )
+        # Run scanner more frequently regardless of timeframe
+        # This will run the scanner every 5 minutes
+        self.scheduler.add_job(
+            self.run_scanner,
+            trigger='interval',
+            minutes=5,  # Run every 5 minutes
+            id='scanner_job',
+            replace_existing=True
+        )
         
-        # Add daily report job
+        # Keep the daily report job
         self.scheduler.add_job(
             self.send_performance_report,
             trigger=CronTrigger(hour=0, minute=1),  # Run daily at 00:01
@@ -693,7 +679,7 @@ class ForexTradingBot:
         
         # Start the scheduler
         self.scheduler.start()
-        logger.info(f"Scheduler started. Running scanner on {self.timeframe} timeframe.")
+        logger.info(f"Scheduler started. Running scanner every 5 minutes while analyzing {self.timeframe} timeframe data.")
 
 # Create global bot instance
 bot = ForexTradingBot(
