@@ -167,9 +167,10 @@ class ForexTradingBot:
         timeframe: str = None,
         start_date: datetime = None,
         end_date: datetime = None,
-        count: int = 200
+        count: int = 200,
+        include_incomplete: bool = True  # Added parameter
     ) -> pd.DataFrame:
-        """Fetch historical price data from OANDA API"""
+        """Fetch historical price data from OANDA API with option for incomplete candles"""
         try:
             logger.info(f"Fetching historical data for {pair}")
             
@@ -212,19 +213,21 @@ class ForexTradingBot:
             # Process the candles
             prices = []
             for candle in response['candles']:
-                if candle['complete']:
+                # Include incomplete candles if requested
+                if candle['complete'] or include_incomplete:
                     prices.append({
                         'time': pd.to_datetime(candle['time']),
                         'open': float(candle['mid']['o']),
                         'high': float(candle['mid']['h']),
                         'low': float(candle['mid']['l']),
-                        'close': float(candle['mid']['c'])
+                        'close': float(candle['mid']['c']),
+                        'complete': candle['complete']
                     })
             
             # Convert to DataFrame
             df = pd.DataFrame(prices)
             
-            # Add pair information to index
+            # Add pair information
             if not df.empty:
                 df.set_index('time', inplace=True)
                 df['pair'] = pair
@@ -481,7 +484,7 @@ class ForexTradingBot:
         
         return buf
 
-    async def scan_for_signals(self) -> List[TradeSignal]:
+    async def scan_for_signals(self, include_incomplete=True) -> List[TradeSignal]:
         """Scan all currency pairs for trading signals"""
         signals = []
         
@@ -491,8 +494,8 @@ class ForexTradingBot:
                 continue
                 
             try:
-                # Fetch and prepare data
-                data = await self.fetch_historical_data(pair)
+                # Fetch and prepare data, including incomplete candles
+                data = await self.fetch_historical_data(pair, include_incomplete=include_incomplete)
                 if data.empty:
                     logger.warning(f"No data available for {pair}, skipping...")
                     continue
@@ -562,7 +565,7 @@ class ForexTradingBot:
         
         try:
             # Check for new signals
-            signals = await self.scan_for_signals()
+            signals = await self.scan_for_signals(include_incomplete=True)
             
             # Process new signals
             for signal in signals:
@@ -659,27 +662,26 @@ class ForexTradingBot:
 
     async def start_scheduler(self):
         """Start the background scheduler"""
-        # Run scanner more frequently regardless of timeframe
-        # This will run the scanner every 5 minutes
+        # Run scanner every 5 minutes
         self.scheduler.add_job(
             self.run_scanner,
             trigger='interval',
-            minutes=5,  # Run every 5 minutes
+            minutes=5,
             id='scanner_job',
             replace_existing=True
         )
         
-        # Keep the daily report job
+        # Daily report job
         self.scheduler.add_job(
             self.send_performance_report,
-            trigger=CronTrigger(hour=0, minute=1),  # Run daily at 00:01
+            trigger=CronTrigger(hour=0, minute=1),
             id='daily_report',
             replace_existing=True
         )
         
         # Start the scheduler
         self.scheduler.start()
-        logger.info(f"Scheduler started. Running scanner every 5 minutes while analyzing {self.timeframe} timeframe data.")
+        logger.info(f"Scheduler started. Running scanner every 5 minutes while analyzing {self.timeframe} data.")
 
 # Create global bot instance
 bot = ForexTradingBot(
